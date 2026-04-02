@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Task Dashboard Orion V2 (POC)</title>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet" />
+
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+
+  <body>
+    <div class="app-root">
+      <div class="role-dashboard">
+        <div class="global-topbar" aria-label="Global date filter">
+          <div class="global-topbar__spacer"></div>
+          <div class="date-filter" aria-label="Date filter">
+            <div class="date-filter__select">
+              <span class="date-filter__icon" aria-hidden="true">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                  <path
+                    d="M7 3v2M17 3v2M4 9h16M6 5h12a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </span>
+              <select id="dateFilter" class="date-filter__dropdown" title="Date range">
+                <option>Current Month</option>
+                <option>Last 7 Days</option>
+                <option>Last 30 Days</option>
+                <option>Last Month</option>
+                <option>Last 3 Months</option>
+                <option>Last 6 Months</option>
+                <option>Custom</option>
+              </select>
+            </div>
+            <button id="applyFiltersBtn" class="date-filter__refresh" type="button" title="Refresh">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M21 12a9 9 0 0 1-15.55 6.36M3 12a9 9 0 0 1 15.55-6.36M3 18v-5h5M21 6v5h-5"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
+              </svg>
+            </button>
+            <div id="customDateRange" class="date-filter__custom" hidden aria-hidden="true">
+              <input id="startDateInput" type="date" class="date-filter__input" />
+              <span class="date-filter__to">to</span>
+              <input id="endDateInput" type="date" class="date-filter__input" />
+            </div>
+          </div>
+        </div>
+
+        <div class="primary-tabs" role="tablist" aria-label="Dashboard sections">
+          <button id="primaryTabBoard" class="primary-tab" type="button" role="tab" aria-selected="false" data-primary-tab="board-overview">
+            Board Overview
+          </button>
+          <button id="primaryTabOrders" class="primary-tab active" type="button" role="tab" aria-selected="true" data-primary-tab="order-tools">
+            Order and Tools
+          </button>
+          <button id="primaryTabIndividualBoard" class="primary-tab" type="button" role="tab" aria-selected="false" data-primary-tab="individual-board">
+            Individual Board
+          </button>
+          <button id="primaryTabTime" class="primary-tab" type="button" role="tab" aria-selected="false" data-primary-tab="time-tracking">
+            Time Tracking
+          </button>
+        </div>
+
+        <div id="primaryPanelBoard" class="primary-panel" data-primary-panel="board-overview" hidden aria-hidden="true"></div>
+
+        <div id="primaryPanelOrderTools" class="primary-panel" data-primary-panel="order-tools">
+        <div id="sharedDashboardContent">
+        <div class="role-tabs" role="tablist" aria-label="Dashboard by role">
+          <button
+            id="roleTabSuperAdmin"
+            class="role-tab active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            data-role="super-admin"
+          >
+            Super Admin / Admin
+          </button>
+          <button id="roleTabManager" class="role-tab" type="button" role="tab" aria-selected="false" data-role="manager-lead">
+            Manager / Lead
+          </button>
+          <button id="roleTabMember" class="role-tab" type="button" role="tab" aria-selected="false" data-role="member">
+            Member
+          </button>
+        </div>
+
+        <div class="dashboard-shell" id="dashboardShell" data-role="super-admin">
+    <div class="topbar">
+      <div class="topbar-spacer"></div>
+      <div class="theme-toggle" aria-label="Theme toggle">
+        <span class="theme-label">Theme</span>
+        <label class="toggle">
+          <input id="themeToggle" type="checkbox" />
+          <span>Light</span>
+        </label>
+      </div>
+      <div class="mode-toggle" aria-label="KPI mode">
+        <span class="theme-label">KPI View</span>
+        <select id="kpiModeSelect" class="mode-select">
+          <option value="main">Main Task</option>
+          <option value="sub">Sub Task</option>
+        </select>
+      </div>
+      <div id="managerLeadScopeWrap" class="scope-toggle" hidden aria-hidden="true">
+        <span class="theme-label">Scope</span>
+        <div class="scope-toggle__seg" role="tablist" aria-label="Manager scope">
+          <button id="scopeAllTasks" type="button" class="scope-btn active" role="tab" aria-selected="true" data-scope="all">All Tasks</button>
+          <button id="scopeMyTasks" type="button" class="scope-btn" role="tab" aria-selected="false" data-scope="mine">My Tasks</button>
+        </div>
+      </div>
+      <button id="smartFilterBtn" class="smart-filter-btn" type="button" aria-haspopup="dialog" aria-expanded="false" title="Filters">
+        <span class="smart-filter-btn__icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+            <path d="M4 6h16M7 12h10M10 18h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          </svg>
+        </span>
+        <span>Filter</span>
+      </button>
+
+      <div id="smartFilterPopover" class="smart-filter-popover" role="dialog" aria-label="Filters" hidden aria-hidden="true">
+        <div class="smart-filter-popover__header">
+          <div class="smart-filter-popover__title">Filters</div>
+          <button id="smartFilterCloseBtn" class="smart-filter-popover__close" type="button" aria-label="Close filters">&times;</button>
+        </div>
+        <div class="smart-filter-popover__body">
+          <details class="sf-dropdown" open>
+            <summary class="sf-dropdown__summary">
+              <span>Assignee</span>
+              <span class="sf-dropdown__meta" id="assigneeSummaryMeta">Any</span>
+            </summary>
+            <div class="sf-dropdown__panel">
+              <input id="filterAssigneeSearch" class="smart-filter-search" type="text" placeholder="Search assignees..." />
+              <div id="filterAssigneeList" class="smart-filter-list"></div>
+              <div class="smart-filter-quick">
+                <button id="filterAssignedToMe" type="button" class="smart-filter-quick__btn">Assigned to Me</button>
+                <button id="filterUnassigned" type="button" class="smart-filter-quick__btn">Unassigned</button>
+              </div>
+            </div>
+          </details>
+
+          <details class="sf-dropdown">
+            <summary class="sf-dropdown__summary">
+              <span>Order Type</span>
+              <span class="sf-dropdown__meta" id="orderTypeSummaryMeta">Any</span>
+            </summary>
+            <div class="sf-dropdown__panel">
+              <div id="filterOrderTypePills" class="smart-filter-pills"></div>
+            </div>
+          </details>
+
+          <details class="sf-dropdown">
+            <summary class="sf-dropdown__summary">
+              <span>Labels</span>
+              <span class="sf-dropdown__meta" id="labelsSummaryMeta">Any</span>
+            </summary>
+            <div class="sf-dropdown__panel">
+              <div id="filterLabelChips" class="smart-filter-chips"></div>
+            </div>
+          </details>
+
+          <details class="sf-dropdown">
+            <summary class="sf-dropdown__summary">
+              <span>Board</span>
+              <span class="sf-dropdown__meta" id="boardSummaryMeta">Any</span>
+            </summary>
+            <div class="sf-dropdown__panel">
+              <div id="filterBoardMulti" class="smart-filter-pills"></div>
+            </div>
+          </details>
+
+          <details class="sf-dropdown">
+            <summary class="sf-dropdown__summary">
+              <span>Stage</span>
+              <span class="sf-dropdown__meta" id="stageSummaryMeta">Any</span>
+            </summary>
+            <div class="sf-dropdown__panel">
+              <div id="filterStageMulti" class="smart-filter-pills"></div>
+            </div>
+          </details>
+
+          <details class="sf-dropdown" id="filterWorkspaceSection">
+            <summary class="sf-dropdown__summary">
+              <span>Workspace</span>
+              <span class="sf-dropdown__meta" id="workspaceSummaryMeta">Any</span>
+            </summary>
+            <div class="sf-dropdown__panel">
+              <div id="filterWorkspaceMulti" class="smart-filter-pills"></div>
+            </div>
+          </details>
+
+          <div id="popoverAppliedFilters" class="popover-applied" hidden aria-hidden="true">
+            <div class="popover-applied__title">Applied filters</div>
+            <div id="popoverAppliedFilterChips" class="popover-applied__chips"></div>
+          </div>
+        </div>
+        <div class="smart-filter-popover__footer">
+          <button id="clearAllFiltersBtn" type="button" class="smart-filter-clear">Clear all</button>
+          <button id="saveFiltersBtn" type="button" class="smart-filter-save" disabled title="Coming soon">Save filter</button>
+        </div>
+      </div>
+
+      <!-- Legacy dropdowns (kept for compatibility; hidden by CSS) -->
+      <div class="dashboard-filters" aria-label="Board and stage filters">
+        <label class="dashboard-filters__label" for="filterBoard">Board</label>
+        <select id="filterBoard" class="mode-select" title="Filter by board"></select>
+        <label class="dashboard-filters__label" for="filterStage">Stage</label>
+        <select id="filterStage" class="mode-select" title="Filter by workflow stage"></select>
+      </div>
+      <div id="filterWorkspaceWrap" class="dashboard-filters dashboard-filters--workspace" hidden aria-hidden="true">
+        <label class="dashboard-filters__label" for="filterWorkspace">Workspace</label>
+        <select id="filterWorkspace" class="mode-select" title="Filter by workspace (Manager / Lead / Member)"></select>
+      </div>
+    </div>
+
+    <!-- KPI -->
+    <div class="kpi-container">
+      <div class="kpi" id="kpiSlot1">
+        <span id="kpi1Label">—</span>
+        <h3 id="kpi1Value">0</h3>
+        <div id="kpi1Delta" class="kpi-delta">—</div>
+      </div>
+
+      <div class="kpi" id="kpiSlot2">
+        <span id="kpi2Label">—</span>
+        <h3 id="kpi2Value">0</h3>
+        <div id="kpi2Delta" class="kpi-delta">—</div>
+      </div>
+
+      <div class="kpi" id="kpiSlot3">
+        <span id="kpi3Label">—</span>
+        <h3 id="kpi3Value">0</h3>
+        <div id="kpi3Delta" class="kpi-delta">—</div>
+      </div>
+
+      <div class="kpi" id="kpiSlot4">
+        <span id="kpi4Label">—</span>
+        <h3 id="kpi4Value">0</h3>
+        <div id="kpi4Delta" class="kpi-delta">—</div>
+      </div>
+    </div>
+
+    <!-- CHARTS + DEADLINES -->
+    <div class="charts">
+      <div class="chart-box chart-box--stage">
+        <div class="chart-box__header">
+          <h4>Task stage distribution</h4>
+          <div class="chart-box__controls" aria-label="Stage chart controls">
+            <label class="mini-select">
+              <span class="mini-select__label">View</span>
+              <select id="stageChartViewSelect" class="mini-select__select">
+                <option value="stage">Stage</option>
+                <option value="age">Task by Age</option>
+                <option value="stage_age">Stage × Age (stacked)</option>
+                <option value="stage_aging">Stage Aging Analysis</option>
+              </select>
+            </label>
+            <label class="mini-select">
+              <span class="mini-select__label">Age basis</span>
+              <select id="ageBasisSelect" class="mini-select__select">
+                <option value="created">Task Created Date</option>
+                <option value="stageEntered">Stage Entered Date</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div id="stageChartWrap" class="stage-chart-wrap">
+          <canvas id="statusChart"></canvas>
+        </div>
+      </div>
+
+      <div class="chart-box" id="assigneeChartBox">
+        <h4>Workload by Assignee</h4>
+        <div class="chart-toolbar">
+          <label class="toggle">
+            <input type="radio" name="assigneeChartMode" value="workload" />
+            <span>View by Workload</span>
+          </label>
+          <label class="toggle">
+            <input type="radio" name="assigneeChartMode" value="performance" checked />
+            <span>View by Performance</span>
+          </label>
+          <label class="toggle">
+            <input type="radio" name="assigneeChartMode" value="smart" />
+            <span>Smart Distribution</span>
+          </label>
+        </div>
+        <div id="assigneeChartWrap" class="assignee-chart-wrap">
+          <canvas id="assigneeChart"></canvas>
+        </div>
+
+        <div id="smartDistributionWrap" class="smart-wrap" hidden>
+          <div class="smart-grid">
+            <div class="smart-card">
+              <div class="smart-title">Current workload share</div>
+              <div class="smart-canvas">
+                <canvas id="smartWorkloadDonut"></canvas>
+              </div>
+            </div>
+            <div class="smart-card">
+              <div class="smart-title">Ideal equal split</div>
+              <div class="smart-canvas">
+                <canvas id="smartEqualBar"></canvas>
+              </div>
+            </div>
+          </div>
+          <div id="smartInsight" class="smart-insight"></div>
+        </div>
+      </div>
+
+      <div class="chart-box" id="healthChartBox">
+        <h4>Task Health</h4>
+        <canvas id="healthChart"></canvas>
+      </div>
+
+      <div class="deadline-widget">
+        <h4>Upcoming Deadlines</h4>
+        <div id="deadlineList" class="deadline-card-list" role="list"></div>
+      </div>
+    </div>
+
+    <!-- Deadline detail modal -->
+    <div id="deadlineModal" class="deadline-modal" hidden aria-hidden="true">
+      <div class="deadline-modal__backdrop" data-deadline-modal-dismiss></div>
+      <div
+        class="deadline-modal__dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="deadlineModalTitle"
+      >
+        <button type="button" class="deadline-modal__close" id="deadlineModalClose" aria-label="Close">
+          &times;
+        </button>
+        <div class="deadline-modal__body">
+          <div class="deadline-modal__left">
+            <div class="deadline-modal__title-row">
+              <div id="deadlineModalDateBadge" class="deadline-date-badge deadline-date-badge--neutral" aria-hidden="true">
+                <div class="deadline-date-badge__month">—</div>
+                <div class="deadline-date-badge__day">—</div>
+              </div>
+              <h2 id="deadlineModalTitle" class="deadline-modal__title"></h2>
+            </div>
+            <div id="deadlineModalSummary" class="deadline-modal__summary"></div>
+            <div class="deadline-modal__orders-wrap">
+              <h3 class="deadline-modal__section-title">Main Tasks</h3>
+              <div class="deadline-modal__table-wrap">
+                <table class="deadline-modal__orders-table">
+                  <thead>
+                    <tr>
+                      <th>Company</th>
+                      <th>Overdue</th>
+                    </tr>
+                  </thead>
+                  <tbody id="deadlineModalOrdersBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+          <div class="deadline-modal__right">
+            <div class="deadline-modal__tabs" role="tablist" aria-label="Deadline details tabs">
+              <button id="deadlineModalTabTools" class="deadline-modal__tab active" type="button" role="tab" aria-selected="true">
+                Tools
+              </button>
+            </div>
+
+            <div class="deadline-modal__tab-content active" id="deadlineModalToolsTab">
+              <div class="deadline-modal__table-wrap">
+                <table class="deadline-modal__table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Due Date</th>
+                      <th>Status</th>
+                      <th>Stage</th>
+                    </tr>
+                  </thead>
+                  <tbody id="deadlineModalToolsBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TABLE -->
+    <div class="table-container">
+      <div class="grid-tabs" role="tablist" aria-label="Grid views">
+        <button id="tabOrderView" class="grid-tab active" type="button" role="tab" aria-selected="true">Order View</button>
+        <button id="tabTaskView" class="grid-tab" type="button" role="tab" aria-selected="false">Task View</button>
+        <div class="grid-tabs-spacer"></div>
+        <button id="exportGridBtn" class="grid-export-btn" type="button">Export CSV</button>
+      </div>
+
+      <div id="gridHealthKpis" class="grid-health-kpis" hidden aria-hidden="true">
+        <div class="grid-health-kpis__item">
+          <span class="grid-health-kpis__icon" aria-hidden="true">▦</span>
+          <span class="grid-health-kpis__label">Total Board:</span>
+          <span class="grid-health-kpis__value" id="kpiTotalBoards">0</span>
+        </div>
+        <div class="grid-health-kpis__item">
+          <span class="grid-health-kpis__icon grid-health-kpis__icon--ok" aria-hidden="true">●</span>
+          <span class="grid-health-kpis__label">Healthy Board:</span>
+          <span class="grid-health-kpis__value" id="kpiHealthyBoards">0</span>
+        </div>
+        <div class="grid-health-kpis__item">
+          <span class="grid-health-kpis__icon grid-health-kpis__icon--warn" aria-hidden="true">●</span>
+          <span class="grid-health-kpis__label">Needs Attention:</span>
+          <span class="grid-health-kpis__value" id="kpiNeedsAttentionBoards">0</span>
+        </div>
+        <div class="grid-health-kpis__item">
+          <span class="grid-health-kpis__icon grid-health-kpis__icon--risk" aria-hidden="true">●</span>
+          <span class="grid-health-kpis__label">At Risk:</span>
+          <span class="grid-health-kpis__value" id="kpiAtRiskBoards">0</span>
+        </div>
+      </div>
+
+      <div id="activeFiltersBar" class="active-filters" hidden aria-hidden="true">
+        <div class="active-filters__chips" id="activeFilterChips"></div>
+        <button id="activeFiltersClear" class="active-filters__clear" type="button">Clear</button>
+      </div>
+
+      <div id="gridContent" class="grid-content">
+        <!-- JS renders active tab table here -->
+      </div>
+    </div>
+        </div> <!-- end dashboard-shell -->
+        </div> <!-- end sharedDashboardContent -->
+        </div> <!-- end primaryPanelOrderTools -->
+
+        <div id="primaryPanelIndividualBoard" class="primary-panel" data-primary-panel="individual-board" hidden aria-hidden="true"></div>
+
+        <div id="primaryPanelTime" class="primary-panel" data-primary-panel="time-tracking" hidden aria-hidden="true">
+          <div class="blank-state">Time Tracking (coming soon)</div>
+        </div>
+      </div>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
