@@ -109,7 +109,7 @@
       <div class="mode-toggle" aria-label="KPI mode">
         <span class="theme-label">KPI View</span>
         <select id="kpiModeSelect" class="mode-select">
-          <option value="main">Main Task</option>
+          <option value="main" selected>Main Task</option>
           <option value="sub">Sub Task</option>
         </select>
       </div>
@@ -190,6 +190,16 @@
             </div>
           </details>
 
+          <details class="sf-dropdown">
+            <summary class="sf-dropdown__summary">
+              <span>Task status</span>
+              <span class="sf-dropdown__meta" id="taskStatusSummaryMeta">Any</span>
+            </summary>
+            <div class="sf-dropdown__panel">
+              <div id="filterTaskStatusPills" class="smart-filter-pills"></div>
+            </div>
+          </details>
+
           <details class="sf-dropdown" id="filterWorkspaceSection">
             <summary class="sf-dropdown__summary">
               <span>Workspace</span>
@@ -253,6 +263,28 @@
 
     <!-- CHARTS + DEADLINES -->
     <div class="charts">
+      <div class="chart-box chart-box--task-flow" id="taskFlowChartBox" aria-label="Task flow over time">
+        <div class="chart-box__header">
+          <div>
+            <h4>Task flow over time</h4>
+            <div class="chart-box__sub">Weekly snapshot — all four KPIs</div>
+          </div>
+          <div class="task-flow__controls" aria-label="Task flow controls">
+            <div class="segmented" role="tablist" aria-label="KPI visibility">
+              <button id="taskFlowAllKpisBtn" type="button" class="segmented__btn active" role="tab" aria-selected="true">
+                All KPIs
+              </button>
+              <button id="taskFlowPerfBtn" type="button" class="segmented__btn" role="tab" aria-selected="false">
+                Performance view (no overdue)
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="task-flow__canvas">
+          <canvas id="taskFlowChart"></canvas>
+        </div>
+      </div>
+
       <div class="chart-box chart-box--stage">
         <div class="chart-box__header">
           <h4>Task stage distribution</h4>
@@ -273,6 +305,7 @@
                 <option value="stageEntered">Stage Entered Date</option>
               </select>
             </label>
+            <button id="expandStageChartBtn" class="chart-expand-btn" type="button" title="Expand chart" aria-label="Expand stage chart">⛶</button>
           </div>
         </div>
         <div id="stageChartWrap" class="stage-chart-wrap">
@@ -281,7 +314,12 @@
       </div>
 
       <div class="chart-box" id="assigneeChartBox">
-        <h4>Workload by Assignee</h4>
+        <div class="chart-box__header">
+          <h4>Workload by Assignee</h4>
+          <div class="chart-box__controls">
+            <button id="expandAssigneeChartBtn" class="chart-expand-btn" type="button" title="Expand chart" aria-label="Expand assignee chart">⛶</button>
+          </div>
+        </div>
         <div class="chart-toolbar">
           <label class="toggle">
             <input type="radio" name="assigneeChartMode" value="workload" />
@@ -325,7 +363,7 @@
       </div>
 
       <div class="deadline-widget">
-        <h4>Upcoming Deadlines</h4>
+        <h4>Overdue</h4>
         <div id="deadlineList" class="deadline-card-list" role="list"></div>
       </div>
     </div>
@@ -433,6 +471,160 @@
 
       <div id="gridContent" class="grid-content">
         <!-- JS renders active tab table here -->
+      </div>
+    </div>
+
+    <!-- Chart expand modal -->
+    <div id="chartExpandModal" class="chart-modal" hidden aria-hidden="true">
+      <div class="chart-modal__backdrop" data-chart-modal-dismiss></div>
+      <div class="chart-modal__dialog" role="dialog" aria-modal="true" aria-labelledby="chartModalTitle">
+        <div class="chart-modal__header">
+          <div class="chart-modal__title" id="chartModalTitle">Chart</div>
+          <button id="chartModalClose" type="button" class="chart-modal__close" aria-label="Close">&times;</button>
+        </div>
+
+        <div class="chart-modal__body">
+          <div class="chart-modal__filters">
+            <div class="chart-modal__filter-row">
+              <div class="chart-modal__filter-group">
+                <div class="chart-modal__filter-label">Custom date range</div>
+                <div class="chart-modal__date">
+                  <input id="modalStartDate" type="date" class="date-filter__input" />
+                  <span class="date-filter__to">to</span>
+                  <input id="modalEndDate" type="date" class="date-filter__input" />
+                </div>
+              </div>
+              <button id="modalClearFilters" type="button" class="smart-filter-clear">Clear</button>
+            </div>
+
+            <details class="sf-dropdown" id="modalFilterAssignee" open>
+              <summary class="sf-dropdown__summary"><span>Assignee</span><span class="sf-dropdown__meta" id="modalAssigneeMeta">Any</span></summary>
+              <div class="sf-dropdown__panel">
+                <input id="modalAssigneeSearch" class="smart-filter-search" type="text" placeholder="Search assignees..." />
+                <div id="modalAssigneeList" class="smart-filter-list"></div>
+              </div>
+            </details>
+
+            <details class="sf-dropdown" id="modalFilterStage" open>
+              <summary class="sf-dropdown__summary"><span>Stage</span><span class="sf-dropdown__meta" id="modalStageMeta">Any</span></summary>
+              <div class="sf-dropdown__panel">
+                <div id="modalStagePills" class="smart-filter-pills"></div>
+              </div>
+            </details>
+
+            <details class="sf-dropdown" id="modalFilterOrderType">
+              <summary class="sf-dropdown__summary"><span>Order Type</span><span class="sf-dropdown__meta" id="modalOrderTypeMeta">Any</span></summary>
+              <div class="sf-dropdown__panel">
+                <div id="modalOrderTypePills" class="smart-filter-pills"></div>
+              </div>
+            </details>
+
+            <details class="sf-dropdown" id="modalFilterLabels">
+              <summary class="sf-dropdown__summary"><span>Labels</span><span class="sf-dropdown__meta" id="modalLabelsMeta">Any</span></summary>
+              <div class="sf-dropdown__panel">
+                <div id="modalLabelChips" class="smart-filter-chips"></div>
+              </div>
+            </details>
+
+            <div id="modalAssigneeModeWrap" class="chart-modal__toggle-row" hidden aria-hidden="true">
+              <div class="chart-modal__filter-label">View</div>
+              <div class="chart-toolbar">
+                <label class="toggle">
+                  <input type="radio" name="modalAssigneeChartMode" value="workload" />
+                  <span>View by Workload</span>
+                </label>
+                <label class="toggle">
+                  <input type="radio" name="modalAssigneeChartMode" value="performance" checked />
+                  <span>View by Performance</span>
+                </label>
+              </div>
+            </div>
+
+            <div id="modalStageModeWrap" class="chart-modal__toggle-row" hidden aria-hidden="true">
+              <div class="chart-modal__filter-label">View</div>
+              <div class="chart-box__controls" aria-label="Modal stage chart controls">
+                <label class="mini-select">
+                  <span class="mini-select__label">View</span>
+                  <select id="modalStageChartViewSelect" class="mini-select__select">
+                    <option value="stage">Stage</option>
+                    <option value="age">Task by Age</option>
+                    <option value="stage_age">Stage × Age (stacked)</option>
+                    <option value="stage_aging">Stage Aging Analysis</option>
+                    <option value="stage_flow">Stage Flow Analysis</option>
+                  </select>
+                </label>
+                <label class="mini-select">
+                  <span class="mini-select__label">Age basis</span>
+                  <select id="modalAgeBasisSelect" class="mini-select__select">
+                    <option value="created">Task Created Date</option>
+                    <option value="stageEntered">Stage Entered Date</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            <div id="modalStageFlowWrap" class="stage-flow" hidden aria-hidden="true">
+              <div class="stage-flow__row">
+                <label class="stage-flow__field">
+                  <span class="chart-modal__filter-label">Source stage</span>
+                  <select id="modalStageFlowSource" class="mode-select" title="Source stage"></select>
+                </label>
+                <label class="stage-flow__field">
+                  <span class="chart-modal__filter-label">Target stage</span>
+                  <select id="modalStageFlowTarget" class="mode-select" title="Target stage"></select>
+                </label>
+              </div>
+              <div class="stage-flow__hint">
+                Uses a linear stage-order model per board to estimate stage-to-stage conversion and cycle time.
+              </div>
+            </div>
+          </div>
+
+          <div class="chart-modal__chart">
+            <canvas id="modalChartCanvas"></canvas>
+            <div id="modalStageFlowCharts" class="stage-flow-charts" hidden aria-hidden="true">
+              <div class="stage-flow-metrics">
+                <div class="sf-metric">
+                  <div class="sf-metric__label">Tasks in source</div>
+                  <div class="sf-metric__value" id="sfMetricSourceTotal">0</div>
+                </div>
+                <div class="sf-metric">
+                  <div class="sf-metric__label">Reached target</div>
+                  <div class="sf-metric__value" id="sfMetricTargetTotal">0</div>
+                </div>
+                <div class="sf-metric">
+                  <div class="sf-metric__label">Conversion</div>
+                  <div class="sf-metric__value" id="sfMetricConversion">—</div>
+                </div>
+                <div class="sf-metric">
+                  <div class="sf-metric__label">Avg time (days)</div>
+                  <div class="sf-metric__value" id="sfMetricAvgDays">—</div>
+                </div>
+              </div>
+
+              <div class="stage-flow-grid">
+                <div class="stage-flow-card">
+                  <div class="stage-flow-card__title">Funnel</div>
+                  <div class="stage-flow-card__canvas">
+                    <canvas id="sfFunnelChart"></canvas>
+                  </div>
+                </div>
+                <div class="stage-flow-card">
+                  <div class="stage-flow-card__title">Conversion trend</div>
+                  <div class="stage-flow-card__canvas">
+                    <canvas id="sfConversionTrend"></canvas>
+                  </div>
+                </div>
+                <div class="stage-flow-card">
+                  <div class="stage-flow-card__title">Average time trend (days)</div>
+                  <div class="stage-flow-card__canvas">
+                    <canvas id="sfAvgTimeTrend"></canvas>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
         </div> <!-- end dashboard-shell -->
