@@ -155,6 +155,7 @@ const smartFilters = {
   labels: new Set(),
   boards: new Set(),
   stages: new Set(),
+  taskStatuses: new Set(), // "healthy" | "warning" | "overdue"
   ageBuckets: new Set(),
   workspaces: new Set(),
   assignedToMe: false,
@@ -221,6 +222,12 @@ function toolMatchesDashboardFilters(tool) {
     const any = labels.some((l) => smartFilters.labels.has(l));
     if (!any) return false;
   }
+
+  // Task status (health) filter
+  if (smartFilters.taskStatuses.size > 0) {
+    const key = computeHealthFromTool(tool, new Date())?.key || "healthy";
+    if (!smartFilters.taskStatuses.has(key)) return false;
+  }
   return true;
 }
 
@@ -236,6 +243,7 @@ function dashboardHasActiveFilters() {
     smartFilters.labels.size > 0 ||
     smartFilters.boards.size > 0 ||
     smartFilters.stages.size > 0 ||
+    smartFilters.taskStatuses.size > 0 ||
     smartWs ||
     smartFilters.unassigned ||
     smartFilters.assignedToMe
@@ -352,6 +360,11 @@ const charts = {
   status: null,
   assignee: null,
   health: null,
+};
+
+const taskFlow = {
+  chart: null,
+  viewMode: "all", // "all" | "performance"
 };
 
 const smartCharts = {
@@ -762,17 +775,17 @@ function computeHealthFromItems(items, now = new Date()) {
 
   if (overdue > 0) return { key: "overdue", label: "Overdue", className: "pill overdue" };
   if (nearDue > 0) return { key: "warning", label: "Near due", className: "pill warning" };
-  return { key: "healthy", label: "Healthy", className: "pill healthy" };
+  return { key: "healthy", label: "On-track", className: "pill healthy" };
 }
 
 function computeHealthFromTool(tool, now = new Date()) {
-  if (!tool?.dueDate) return { key: "healthy", label: "Healthy", className: "pill healthy" };
-  if (tool.status === STATUS.Done) return { key: "healthy", label: "Healthy", className: "pill healthy" };
+  if (!tool?.dueDate) return { key: "healthy", label: "On-track", className: "pill healthy" };
+  if (tool.status === STATUS.Done) return { key: "healthy", label: "On-track", className: "pill healthy" };
   const d = daysUntil(tool.dueDate, now);
-  if (d === null) return { key: "healthy", label: "Healthy", className: "pill healthy" };
+  if (d === null) return { key: "healthy", label: "On-track", className: "pill healthy" };
   if (d < 0) return { key: "overdue", label: "Overdue", className: "pill overdue" };
   if (d <= 2) return { key: "warning", label: "Near due", className: "pill warning" };
-  return { key: "healthy", label: "Healthy", className: "pill healthy" };
+  return { key: "healthy", label: "On-track", className: "pill healthy" };
 }
 
 function flattenToolsFromOrders(allOrders) {
@@ -1114,7 +1127,251 @@ function createSmartDistributionCharts() {
   renderSmartInsight(names, values, equalShare);
 }
 
-let kpiMode = "sub"; // "main" | "sub"
+let kpiMode = "main"; // "main" | "sub"
+
+function parseIsoDateToLocalMidnightOrNull(iso) {
+  const s = (iso || "").trim();
+  if (!s) return null;
+  const parts = s.split("-");
+  if (parts.length !== 3) return null;
+  const y = Number(parts[0]);
+  const m = Number(parts[1]);
+  const d = Number(parts[2]);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+  return new Date(y, m - 1, d);
+}
+
+function startOfWeekMonday(d) {
+  const x = clampToLocalMidnight(d);
+  const day = x.getDay(); // 0..6 (Sun..Sat)
+  const diff = (day + 6) % 7; // Mon->0 ... Sun->6
+  x.setDate(x.getDate() - diff);
+  return x;
+}
+
+function formatShortDayLabel(d) {
+  const dt = clampToLocalMidnight(d);
+  return dt.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function buildTimeBuckets(range) {
+  const now = new Date();
+  const start = range?.start ? clampToLocalMidnight(range.start) : new Date(now.getFullYear(), now.getMonth(), 1);
+  const end = range?.end ? clampToLocalMidnight(range.end) : clampToLocalMidnight(now);
+  const endInclusive = new Date(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59, 999);
+  const diffDays = Math.max(0, Math.round((clampToLocalMidnight(end) - clampToLocalMidnight(start)) / 86400000));
+
+  const useWeekly = diffDays > 35;
+  const buckets = [];
+  if (useWeekly) {
+    let cur = startOfWeekMonday(start);
+    let idx = 1;
+    while (cur <= endInclusive) {
+      const bStart = clampToLocalMidnight(cur);
+      const bEnd = new Date(bStart);
+      bEnd.setDate(bEnd.getDate() + 6);
+      bEnd.setHours(23, 59, 59, 999);
+      buckets.push({ label: `W${idx}`, start: bStart, end: bEnd });
+      cur = new Date(bStart);
+      cur.setDate(cur.getDate() + 7);
+      idx++;
+      if (idx > 120) break; // safety
+    }
+  } else {
+    let cur = clampToLocalMidnight(start);
+    while (cur <= endInclusive) {
+      const bStart = clampToLocalMidnight(cur);
+      const bEnd = new Date(bStart);
+      bEnd.setHours(23, 59, 59, 999);
+      buckets.push({ label: formatShortDayLabel(bStart), start: bStart, end: bEnd });
+      cur = new Date(bStart);
+      cur.setDate(cur.getDate() + 1);
+      if (buckets.length > 400) break; // safety
+    }
+  }
+  return buckets;
+}
+
+function isDoneStatus(status) {
+  return String(status || "").toLowerCase() === "done";
+}
+
+function taskFlowBaselineMainTasks(range) {
+  const scoped = getOrdersMatchingDashboardFilters();
+  const mains = scoped.map((o) => {
+    const tools = o.tools || [];
+    const createdMin = tools
+      .map((t) => parseIsoDateToLocalMidnightOrNull(t.createdDate))
+      .filter(Boolean)
+      .sort((a, b) => a - b)[0];
+    const dueMax = tools
+      .map((t) => parseIsoDateToLocalMidnightOrNull(t.dueDate))
+      .filter(Boolean)
+      .sort((a, b) => b - a)[0];
+    const done = tools.length > 0 && tools.every((t) => isDoneStatus(t.status));
+    return {
+      id: o.id,
+      createdDate: createdMin ? toDateInputValue(createdMin) : null,
+      dueDate: dueMax ? toDateInputValue(dueMax) : null,
+      status: done ? STATUS.Done : STATUS.Working,
+    };
+  });
+  return filterTasksByDate(
+    mains.filter((t) => t.createdDate || t.dueDate),
+    range
+  );
+}
+
+function taskFlowBaselineSubTasks(range) {
+  const tasks = getFilteredFlatTools().map((t) => ({
+    id: t.toolId,
+    createdDate: t.createdDate,
+    dueDate: t.dueDate,
+    status: t.status,
+  }));
+  return filterTasksByDate(tasks, range);
+}
+
+function computeTaskFlowSeries(tasks, buckets) {
+  const parsed = (tasks || [])
+    .map((t) => ({
+      created: parseIsoDateToLocalMidnightOrNull(t.createdDate),
+      due: parseIsoDateToLocalMidnightOrNull(t.dueDate),
+      status: t.status,
+    }))
+    .filter((t) => t.created || t.due);
+
+  const created = [];
+  const completed = [];
+  const active = [];
+  const overdue = [];
+
+  for (const b of buckets) {
+    const c = parsed.filter((t) => t.created && t.created >= b.start && t.created <= b.end).length;
+
+    // POC rule: completion date is proxied by dueDate for Done tasks (no explicit completedDate in dataset)
+    const comp = parsed.filter((t) => isDoneStatus(t.status) && t.due && t.due >= b.start && t.due <= b.end).length;
+
+    // Snapshot at bucket end
+    const a = parsed.filter((t) => !isDoneStatus(t.status) && t.created && t.created <= b.end).length;
+    const o = parsed.filter((t) => !isDoneStatus(t.status) && t.due && t.due < b.end).length;
+
+    created.push(c);
+    completed.push(comp);
+    active.push(a);
+    overdue.push(o);
+  }
+
+  return { created, active, completed, overdue };
+}
+
+function syncTaskFlowViewButtons() {
+  const allBtn = document.getElementById("taskFlowAllKpisBtn");
+  const perfBtn = document.getElementById("taskFlowPerfBtn");
+  if (!allBtn || !perfBtn) return;
+  const isAll = taskFlow.viewMode === "all";
+  allBtn.classList.toggle("active", isAll);
+  allBtn.setAttribute("aria-selected", isAll ? "true" : "false");
+  perfBtn.classList.toggle("active", !isAll);
+  perfBtn.setAttribute("aria-selected", !isAll ? "true" : "false");
+}
+
+function updateTaskFlowChart() {
+  const canvas = document.getElementById("taskFlowChart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  const range = getActiveDateRangeFromUi();
+  const buckets = buildTimeBuckets(range);
+
+  const baseline = kpiMode === "main" ? taskFlowBaselineMainTasks(range) : taskFlowBaselineSubTasks(range);
+  const series = computeTaskFlowSeries(baseline, buckets);
+  const tokens = getThemeTokens();
+
+  const showOverdue = taskFlow.viewMode === "all";
+  const datasets = [
+    {
+      label: "Created",
+      data: series.created,
+      borderColor: tokens.accent,
+      backgroundColor: "rgba(0,169,255,0.12)",
+      tension: 0.42,
+      borderWidth: 2,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+    },
+    {
+      label: "Active",
+      data: series.active,
+      borderColor: "rgba(253,171,61,0.95)",
+      backgroundColor: "rgba(253,171,61,0.10)",
+      tension: 0.42,
+      borderWidth: 2,
+      borderDash: [6, 5],
+      pointRadius: 3,
+      pointHoverRadius: 5,
+    },
+    {
+      label: "Completed",
+      data: series.completed,
+      borderColor: "rgba(0,200,117,0.95)",
+      backgroundColor: "rgba(0,200,117,0.10)",
+      tension: 0.42,
+      borderWidth: 2,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+    },
+    {
+      label: "Overdue",
+      data: series.overdue,
+      borderColor: "rgba(223,47,74,0.95)",
+      backgroundColor: "rgba(223,47,74,0.10)",
+      tension: 0.42,
+      borderWidth: 2,
+      borderDash: [2, 6],
+      pointRadius: 3,
+      pointHoverRadius: 5,
+      hidden: !showOverdue,
+    },
+  ];
+
+  const config = {
+    type: "line",
+    data: {
+      labels: buckets.map((b) => b.label),
+      datasets,
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 450, easing: "easeOutQuart" },
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { position: "top", labels: { usePointStyle: true, boxWidth: 10 } },
+        tooltip: {
+          callbacks: {
+            title: (items) => items?.[0]?.label || "",
+            label: (ctx) => `${ctx.dataset.label}: ${ctx.formattedValue}`,
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: tokens.gridLine }, ticks: { color: tokens.textDim } },
+        y: { beginAtZero: true, grid: { color: tokens.gridLine }, ticks: { color: tokens.textDim } },
+      },
+    },
+  };
+
+  if (!taskFlow.chart) {
+    taskFlow.chart = new Chart(canvas, config);
+    return;
+  }
+
+  taskFlow.chart.data.labels = config.data.labels;
+  taskFlow.chart.data.datasets = config.data.datasets;
+  taskFlow.chart.options.scales.x.grid.color = tokens.gridLine;
+  taskFlow.chart.options.scales.y.grid.color = tokens.gridLine;
+  taskFlow.chart.update();
+}
 
 function trendFor(value, total, { invert = false } = {}) {
   // Deterministic POC trend: compare ratio vs a baseline (50%).
@@ -1652,7 +1909,7 @@ function renderOrderView(range) {
         <th>Order Type</th>
         <th>Labels</th>
         <th>Tool Count</th>
-        <th>Task Health</th>
+        <th>Task status</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -1705,7 +1962,7 @@ function renderOrderView(range) {
             <th>Board</th>
             <th>Stage</th>
             <th>Workspace</th>
-            <th>Health</th>
+            <th>Sub task Status</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -1783,7 +2040,7 @@ function renderTaskViewFromOrders(range) {
         <th>Board</th>
         <th>Stage</th>
         <th>Workspace</th>
-        <th>Health</th>
+        <th>Sub task Status</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -1848,6 +2105,7 @@ function clearSmartFilters() {
   smartFilters.labels.clear();
   smartFilters.boards.clear();
   smartFilters.stages.clear();
+  smartFilters.taskStatuses.clear();
   smartFilters.ageBuckets.clear();
   smartFilters.workspaces.clear();
   smartFilters.assignedToMe = false;
@@ -1861,6 +2119,10 @@ function smartFiltersToChips() {
   for (const l of smartFilters.labels) chips.push({ key: "label", value: l, label: `Label: ${l}` });
   for (const b of smartFilters.boards) chips.push({ key: "board", value: b, label: `Board: ${b}` });
   for (const s of smartFilters.stages) chips.push({ key: "stage", value: s, label: `Stage: ${s}` });
+  for (const hs of smartFilters.taskStatuses) {
+    const label = hs === "healthy" ? "On-track" : hs === "warning" ? "Near due" : "Overdue";
+    chips.push({ key: "taskStatus", value: hs, label: `Task status: ${label}` });
+  }
   for (const ab of smartFilters.ageBuckets) {
     const label = AGE_BUCKETS.find((x) => x.key === ab)?.label || ab;
     chips.push({ key: "ageBucket", value: ab, label: `Age: ${label}` });
@@ -1902,6 +2164,7 @@ function renderActiveFilterChips() {
       if (c.key === "label") smartFilters.labels.delete(c.value);
       if (c.key === "board") smartFilters.boards.delete(c.value);
       if (c.key === "stage") smartFilters.stages.delete(c.value);
+      if (c.key === "taskStatus") smartFilters.taskStatuses.delete(c.value);
       if (c.key === "workspace") smartFilters.workspaces.delete(c.value);
       if (c.key === "ageBucket") smartFilters.ageBuckets.delete(c.value);
       if (c.key === "assignedToMe") smartFilters.assignedToMe = false;
@@ -1947,6 +2210,7 @@ function syncSmartFilterUiFromState() {
   setMeta("labelsSummaryMeta", smartFilters.labels.size ? `${smartFilters.labels.size} selected` : "Any");
   setMeta("boardSummaryMeta", smartFilters.boards.size ? `${smartFilters.boards.size} selected` : "Any");
   setMeta("stageSummaryMeta", smartFilters.stages.size ? `${smartFilters.stages.size} selected` : "Any");
+  setMeta("taskStatusSummaryMeta", smartFilters.taskStatuses.size ? `${smartFilters.taskStatuses.size} selected` : "Any");
   setMeta(
     "workspaceSummaryMeta",
     workspaceFilterAppliesToRole() ? (smartFilters.workspaces.size ? `${smartFilters.workspaces.size} selected` : "Any") : "Hidden"
@@ -1969,6 +2233,28 @@ function syncSmartFilterUiFromState() {
           // Stage list depends on board selection
           if (id === "filterBoardMulti") renderStagePills();
           renderActiveFilterChips();
+          applyAndRender();
+        })
+      );
+    }
+  }
+
+  // Task status pills
+  const statusHost = document.getElementById("filterTaskStatusPills");
+  if (statusHost) {
+    const options = [
+      { key: "healthy", label: "On-track" },
+      { key: "warning", label: "Near due" },
+      { key: "overdue", label: "Overdue" },
+    ];
+    statusHost.innerHTML = "";
+    for (const opt of options) {
+      statusHost.appendChild(
+        makePillButton(opt.label, smartFilters.taskStatuses.has(opt.key), () => {
+          if (smartFilters.taskStatuses.has(opt.key)) smartFilters.taskStatuses.delete(opt.key);
+          else smartFilters.taskStatuses.add(opt.key);
+          renderActiveFilterChips();
+          syncSmartFilterUiFromState();
           applyAndRender();
         })
       );
@@ -2148,6 +2434,637 @@ function applyAssigneeFilter(assignee) {
   renderActiveFilterChips();
   syncSmartFilterUiFromState();
   applyAndRender();
+}
+
+const chartModalState = {
+  open: false,
+  type: null, // "stage" | "assignee"
+  chart: null,
+  stageFlow: {
+    source: null,
+    target: null,
+    charts: {
+      funnel: null,
+      conversionTrend: null,
+      avgTimeTrend: null,
+    },
+  },
+  filters: {
+    assignees: new Set(),
+    stages: new Set(),
+    orderTypes: new Set(),
+    labels: new Set(),
+    start: null,
+    end: null,
+  },
+  stageView: "stage",
+  ageBasis: "created",
+  assigneeMode: "performance",
+};
+
+function parseDateInputOrNull(value) {
+  if (!value) return null;
+  try {
+    const d = parseIsoDate(value);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  } catch {
+    return null;
+  }
+}
+
+function setModalMeta(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function getModalBaselineTasks() {
+  // Baseline respects current dashboard filters + date range + role scope
+  return getFilteredFlatTools();
+}
+
+function getModalFilteredTasks() {
+  const base = getModalBaselineTasks();
+  const { assignees, stages, orderTypes, labels, start, end } = chartModalState.filters;
+  return base.filter((t) => {
+    if (assignees.size > 0 && !assignees.has(t.assignee || "—")) return false;
+    if (stages.size > 0 && !stages.has(t.workflowStage || "—")) return false;
+    if (orderTypes.size > 0 && !orderTypes.has(t.orderType || "—")) return false;
+    if (labels.size > 0) {
+      const ls = t.labels || [];
+      if (!ls.some((x) => labels.has(x))) return false;
+    }
+    if (start || end) {
+      const due = safeParseDueDate(t.dueDate);
+      if (!due) return false;
+      const time = due.getTime();
+      if (start && time < start.getTime()) return false;
+      if (end) {
+        const end2 = new Date(end);
+        end2.setHours(23, 59, 59, 999);
+        if (time > end2.getTime()) return false;
+      }
+    }
+    return true;
+  });
+}
+
+function renderModalAssigneeList() {
+  const host = document.getElementById("modalAssigneeList");
+  if (!host) return;
+  const q = (document.getElementById("modalAssigneeSearch")?.value || "").trim().toLowerCase();
+  host.innerHTML = "";
+  const list = ASSIGNEES.filter((a) => !q || a.toLowerCase().includes(q));
+  for (const a of list) {
+    const row = document.createElement("label");
+    row.className = "smart-filter-item";
+    const checked = chartModalState.filters.assignees.has(a);
+    row.innerHTML = `<input type="checkbox" ${checked ? "checked" : ""} /> <span class="avatar">${a.slice(0, 1).toUpperCase()}</span> <span>${a}</span>`;
+    row.querySelector("input")?.addEventListener("change", (e) => {
+      const on = Boolean(e.target?.checked);
+      if (on) chartModalState.filters.assignees.add(a);
+      else chartModalState.filters.assignees.delete(a);
+      updateChartModal();
+    });
+    host.appendChild(row);
+  }
+}
+
+function renderModalPills(hostId, options, setRef, metaId) {
+  const host = document.getElementById(hostId);
+  if (!host) return;
+  host.innerHTML = "";
+  for (const o of options) {
+    host.appendChild(
+      makePillButton(o, setRef.has(o), () => {
+        if (setRef.has(o)) setRef.delete(o);
+        else setRef.add(o);
+        updateChartModal();
+      })
+    );
+  }
+  setModalMeta(metaId, setRef.size ? `${setRef.size} selected` : "Any");
+}
+
+function renderModalLabelChips() {
+  const host = document.getElementById("modalLabelChips");
+  if (!host) return;
+  host.innerHTML = "";
+  for (const l of LABEL_OPTIONS) {
+    const chip = document.createElement("span");
+    const active = chartModalState.filters.labels.has(l);
+    chip.className = "label-chip";
+    chip.style.background = `${LABEL_COLORS[l]}20`;
+    chip.style.border = `1px solid ${LABEL_COLORS[l]}55`;
+    chip.style.color = LABEL_COLORS[l];
+    chip.style.opacity = active ? "1" : "0.75";
+    chip.textContent = l;
+    chip.addEventListener("click", () => {
+      if (chartModalState.filters.labels.has(l)) chartModalState.filters.labels.delete(l);
+      else chartModalState.filters.labels.add(l);
+      updateChartModal();
+    });
+    host.appendChild(chip);
+  }
+  setModalMeta("modalLabelsMeta", chartModalState.filters.labels.size ? `${chartModalState.filters.labels.size} selected` : "Any");
+}
+
+function destroyModalChart() {
+  if (chartModalState.chart) {
+    chartModalState.chart.destroy();
+    chartModalState.chart = null;
+  }
+}
+
+function destroyStageFlowCharts() {
+  const c = chartModalState.stageFlow?.charts;
+  if (!c) return;
+  for (const key of ["funnel", "conversionTrend", "avgTimeTrend"]) {
+    if (c[key]) {
+      c[key].destroy();
+      c[key] = null;
+    }
+  }
+}
+
+function setHiddenWithAria(el, hidden) {
+  if (!el) return;
+  el.hidden = Boolean(hidden);
+  el.setAttribute("aria-hidden", hidden ? "true" : "false");
+}
+
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = String(text);
+}
+
+function clamp01(x) {
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(1, x));
+}
+
+function isoToLocalMidnightMs(iso) {
+  const d = safeParseDueDate(iso);
+  if (!d) return null;
+  return clampToLocalMidnight(d).getTime();
+}
+
+function startOfWeekLocal(date) {
+  const d = clampToLocalMidnight(date);
+  const day = d.getDay(); // 0=Sun..6=Sat
+  const delta = (day + 6) % 7; // monday start
+  d.setDate(d.getDate() - delta);
+  return d;
+}
+
+function formatWeekLabel(weekStartDate) {
+  if (!weekStartDate) return "—";
+  return weekStartDate.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
+}
+
+function stageIndexForTool(tool, stageName) {
+  const board = tool.board;
+  const stages = STAGES_BY_BOARD[board] || [];
+  return stages.indexOf(stageName);
+}
+
+function inferStageEntryDateMs(tool, stageName) {
+  // POC model:
+  // - Task starts at stage[0] at createdDate
+  // - Task reaches its current stage at stageEnteredDate
+  // - Intermediate stage entry dates are linearly interpolated
+  const board = tool.board;
+  const stages = STAGES_BY_BOARD[board] || [];
+  if (!stages.length) return null;
+
+  const createdMs = isoToLocalMidnightMs(tool.createdDate);
+  const currentMs = isoToLocalMidnightMs(tool.stageEnteredDate) ?? createdMs;
+  if (createdMs === null || currentMs === null) return null;
+
+  const idxCurrent = stages.indexOf(tool.workflowStage);
+  const idx = stages.indexOf(stageName);
+  if (idx < 0 || idxCurrent < 0) return null;
+  if (idx === 0) return createdMs;
+  if (idxCurrent === 0) return createdMs;
+
+  const span = Math.max(0, currentMs - createdMs);
+  const frac = clamp01(idx / idxCurrent);
+  return createdMs + Math.round(span * frac);
+}
+
+function buildStageFlowModel(tools, sourceStage, targetStage) {
+  // Only consider tools where both stages exist on their board and source precedes target.
+  const eligible = [];
+  for (const t of tools) {
+    const boardStages = STAGES_BY_BOARD[t.board] || [];
+    const sIdx = boardStages.indexOf(sourceStage);
+    const tIdx = boardStages.indexOf(targetStage);
+    const cIdx = boardStages.indexOf(t.workflowStage);
+    if (sIdx < 0 || tIdx < 0 || cIdx < 0) continue;
+    if (sIdx >= tIdx) continue;
+    eligible.push({ t, sIdx, tIdx, cIdx });
+  }
+
+  let reachedSource = 0;
+  let reachedTarget = 0;
+  const deltasDays = [];
+
+  for (const it of eligible) {
+    if (it.cIdx >= it.sIdx) reachedSource += 1;
+    if (it.cIdx >= it.tIdx) {
+      reachedTarget += 1;
+      const sMs = inferStageEntryDateMs(it.t, sourceStage);
+      const tMs = inferStageEntryDateMs(it.t, targetStage);
+      if (sMs !== null && tMs !== null && tMs >= sMs) {
+        deltasDays.push((tMs - sMs) / (1000 * 60 * 60 * 24));
+      }
+    }
+  }
+
+  const conversion = reachedSource > 0 ? reachedTarget / reachedSource : 0;
+  const avgDays =
+    deltasDays.length > 0 ? deltasDays.reduce((s, n) => s + n, 0) / deltasDays.length : null;
+
+  // Cohort trend by week of (inferred) source entry.
+  const byWeek = new Map(); // weekStartMs -> { source, target, deltas[] }
+  for (const it of eligible) {
+    if (it.cIdx < it.sIdx) continue; // hasn't reached source
+    const sEntry = inferStageEntryDateMs(it.t, sourceStage);
+    if (sEntry === null) continue;
+    const wk = startOfWeekLocal(new Date(sEntry));
+    const wkMs = wk.getTime();
+    if (!byWeek.has(wkMs)) byWeek.set(wkMs, { source: 0, target: 0, deltas: [] });
+    const bucket = byWeek.get(wkMs);
+    bucket.source += 1;
+    if (it.cIdx >= it.tIdx) {
+      bucket.target += 1;
+      const tEntry = inferStageEntryDateMs(it.t, targetStage);
+      if (tEntry !== null && tEntry >= sEntry) bucket.deltas.push((tEntry - sEntry) / (1000 * 60 * 60 * 24));
+    }
+  }
+
+  const weekKeys = [...byWeek.keys()].sort((a, b) => a - b);
+  const trendLabels = weekKeys.map((ms) => formatWeekLabel(new Date(ms)));
+  const conversionTrend = weekKeys.map((ms) => {
+    const b = byWeek.get(ms);
+    return b.source > 0 ? (b.target / b.source) * 100 : 0;
+  });
+  const avgTimeTrend = weekKeys.map((ms) => {
+    const b = byWeek.get(ms);
+    if (!b.deltas.length) return null;
+    return b.deltas.reduce((s, n) => s + n, 0) / b.deltas.length;
+  });
+
+  return {
+    reachedSource,
+    reachedTarget,
+    conversionPct: conversion * 100,
+    avgDays,
+    trend: { labels: trendLabels, conversionPct: conversionTrend, avgDays: avgTimeTrend },
+  };
+}
+
+function renderStageFlowAnalysisInModal(tools) {
+  const canvasMain = document.getElementById("modalChartCanvas");
+  const wrapSelectors = document.getElementById("modalStageFlowWrap");
+  const wrapCharts = document.getElementById("modalStageFlowCharts");
+
+  setHiddenWithAria(wrapSelectors, false);
+  setHiddenWithAria(wrapCharts, false);
+  if (canvasMain) canvasMain.style.display = "none";
+
+  const sourceSel = document.getElementById("modalStageFlowSource");
+  const targetSel = document.getElementById("modalStageFlowTarget");
+  if (!sourceSel || !targetSel) return;
+
+  const allStages = getAllStagesUnionSorted();
+  const ensureOptionList = (sel) => {
+    sel.innerHTML = "";
+    for (const s of allStages) {
+      const opt = document.createElement("option");
+      opt.value = s;
+      opt.textContent = s;
+      sel.appendChild(opt);
+    }
+  };
+  if (!sourceSel.options.length) ensureOptionList(sourceSel);
+  if (!targetSel.options.length) ensureOptionList(targetSel);
+
+  // Default selection
+  if (!chartModalState.stageFlow.source) chartModalState.stageFlow.source = allStages.includes("Open") ? "Open" : allStages[0] || null;
+  if (!chartModalState.stageFlow.target) {
+    const preferred = allStages.includes("Completed") ? "Completed" : allStages[allStages.length - 1] || null;
+    chartModalState.stageFlow.target = preferred;
+  }
+
+  sourceSel.value = chartModalState.stageFlow.source || "";
+  targetSel.value = chartModalState.stageFlow.target || "";
+
+  const render = () => {
+    destroyStageFlowCharts();
+    const source = sourceSel.value;
+    const target = targetSel.value;
+    chartModalState.stageFlow.source = source;
+    chartModalState.stageFlow.target = target;
+
+    const tokens = getThemeTokens();
+    const model = buildStageFlowModel(tools, source, target);
+    setText("sfMetricSourceTotal", model.reachedSource);
+    setText("sfMetricTargetTotal", model.reachedTarget);
+    setText("sfMetricConversion", model.reachedSource ? `${model.conversionPct.toFixed(1)}%` : "—");
+    setText("sfMetricAvgDays", model.avgDays === null ? "—" : model.avgDays.toFixed(1));
+
+    const funnel = document.getElementById("sfFunnelChart");
+    const conv = document.getElementById("sfConversionTrend");
+    const avg = document.getElementById("sfAvgTimeTrend");
+    if (!funnel || !conv || !avg) return;
+
+    chartModalState.stageFlow.charts.funnel = new Chart(funnel, {
+      type: "bar",
+      data: {
+        labels: [`${source}`, `${target}`],
+        datasets: [
+          {
+            label: "Tasks",
+            data: [model.reachedSource, model.reachedTarget],
+            backgroundColor: [tokens.accent, "rgba(0,200,117,0.85)"],
+            borderRadius: 10,
+            maxBarThickness: 52,
+          },
+        ],
+      },
+      options: {
+        indexAxis: "y",
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { beginAtZero: true, ticks: { color: tokens.textDim, precision: 0 }, grid: { color: tokens.gridLine } },
+          y: { ticks: { color: tokens.textDim }, grid: { color: tokens.gridLine } },
+        },
+      },
+    });
+
+    chartModalState.stageFlow.charts.conversionTrend = new Chart(conv, {
+      type: "line",
+      data: {
+        labels: model.trend.labels,
+        datasets: [
+          {
+            label: "Conversion (%)",
+            data: model.trend.conversionPct,
+            borderColor: tokens.accent,
+            backgroundColor: "rgba(0,169,255,0.15)",
+            fill: true,
+            tension: 0.35,
+            pointRadius: 3,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: tokens.textDim }, grid: { color: tokens.gridLine } },
+          y: { beginAtZero: true, ticks: { color: tokens.textDim, callback: (v) => `${v}%` }, grid: { color: tokens.gridLine } },
+        },
+      },
+    });
+
+    chartModalState.stageFlow.charts.avgTimeTrend = new Chart(avg, {
+      type: "line",
+      data: {
+        labels: model.trend.labels,
+        datasets: [
+          {
+            label: "Avg days",
+            data: model.trend.avgDays,
+            borderColor: "rgba(253,171,61,0.95)",
+            backgroundColor: "rgba(253,171,61,0.12)",
+            fill: true,
+            tension: 0.35,
+            pointRadius: 3,
+            spanGaps: true,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: tokens.textDim }, grid: { color: tokens.gridLine } },
+          y: { beginAtZero: true, ticks: { color: tokens.textDim }, grid: { color: tokens.gridLine } },
+        },
+      },
+    });
+  };
+
+  sourceSel.onchange = render;
+  targetSel.onchange = render;
+  render();
+}
+
+function hideStageFlowInModal() {
+  const canvasMain = document.getElementById("modalChartCanvas");
+  const wrapSelectors = document.getElementById("modalStageFlowWrap");
+  const wrapCharts = document.getElementById("modalStageFlowCharts");
+  setHiddenWithAria(wrapSelectors, true);
+  setHiddenWithAria(wrapCharts, true);
+  destroyStageFlowCharts();
+  if (canvasMain) canvasMain.style.display = "";
+}
+
+function buildModalAggregates(tasks) {
+  return buildAggregates(
+    tasks.map((t) => ({
+      id: t.toolId,
+      name: `${t.orderName} ↳ ${t.toolName}`,
+      assignee: t.assignee,
+      status: t.status,
+      dueDate: t.dueDate,
+      parentId: t.orderId,
+      workflowStage: t.workflowStage,
+      board: t.board,
+      workspace: t.workspace,
+      orderType: t.orderType,
+      labels: t.labels,
+      createdDate: t.createdDate,
+      stageEnteredDate: t.stageEnteredDate,
+    }))
+  );
+}
+
+function updateStageChartWrapForCount(canvas, labelsCount) {
+  const rowPx = 28;
+  const minPx = 320;
+  const desired = Math.max(minPx, labelsCount * rowPx);
+  canvas.style.height = `${desired}px`;
+}
+
+function renderChartModalChart() {
+  const canvas = document.getElementById("modalChartCanvas");
+  if (!canvas) return;
+  destroyModalChart();
+  hideStageFlowInModal();
+
+  const tasks = getModalFilteredTasks();
+  const aggregates = buildModalAggregates(tasks);
+  const tokens = getThemeTokens();
+
+  if (chartModalState.type === "stage") {
+    if (chartModalState.stageView === "stage_flow") {
+      renderStageFlowAnalysisInModal(tasks);
+      return;
+    }
+
+    // Temporarily use the existing stage model builder, but with local modes
+    const prevView = stageChartViewMode;
+    const prevBasis = ageBasisMode;
+    stageChartViewMode = chartModalState.stageView;
+    ageBasisMode = chartModalState.ageBasis;
+
+    const model = getStageChartModelFromAggregatesAndTasks(aggregates, tasks);
+    updateStageChartWrapForCount(canvas, model.labels.length);
+
+    chartModalState.chart = new Chart(canvas, {
+      type: "bar",
+      data: { labels: model.labels, datasets: model.datasets },
+      options: {
+        indexAxis: "y",
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: stageChartViewMode === "stage_age" || stageChartViewMode === "stage_aging", position: "bottom" },
+        },
+        scales: {
+          x: { beginAtZero: true, ticks: { color: tokens.textDim, precision: 0, stepSize: 1 }, grid: { color: tokens.gridLine }, stacked: stageChartViewMode === "stage_age" || stageChartViewMode === "stage_aging" },
+          y: { ticks: { color: tokens.textDim, autoSkip: false }, grid: { color: tokens.gridLine }, stacked: stageChartViewMode === "stage_age" || stageChartViewMode === "stage_aging" },
+        },
+      },
+    });
+
+    stageChartViewMode = prevView;
+    ageBasisMode = prevBasis;
+    return;
+  }
+
+  // Assignee chart modal
+  const prevMode = assigneeChartMode;
+  assigneeChartMode = chartModalState.assigneeMode;
+  const model = buildAssigneeChartModel(
+    tasks.map((t) => ({
+      id: t.toolId,
+      name: `${t.orderName} ↳ ${t.toolName}`,
+      assignee: t.assignee || "—",
+      status: t.status,
+      dueDate: t.dueDate,
+      parentId: t.orderId,
+    }))
+  );
+  assigneeChartMode = prevMode;
+
+  // Reuse the same configuration pattern as createOrRecreateAssigneeChart (simplified for modal)
+  const indexAxis = model.useHorizontal ? "y" : "x";
+  const label = chartModalState.assigneeMode === "workload" ? "Workload (tasks)" : "Performance Score";
+  chartModalState.chart = new Chart(canvas, {
+    type: "bar",
+    data: {
+      labels: model.labels,
+      datasets: [{ label, data: model.values, backgroundColor: "#00a9ff", borderRadius: 6, maxBarThickness: 28 }],
+    },
+    options: {
+      indexAxis,
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: tokens.textDim }, grid: { color: tokens.gridLine } },
+        y: { ticks: { color: tokens.textDim }, grid: { color: tokens.gridLine } },
+      },
+    },
+  });
+}
+
+function syncChartModalMetas() {
+  setModalMeta("modalAssigneeMeta", chartModalState.filters.assignees.size ? `${chartModalState.filters.assignees.size} selected` : "Any");
+  setModalMeta("modalStageMeta", chartModalState.filters.stages.size ? `${chartModalState.filters.stages.size} selected` : "Any");
+  setModalMeta("modalOrderTypeMeta", chartModalState.filters.orderTypes.size ? `${chartModalState.filters.orderTypes.size} selected` : "Any");
+  setModalMeta("modalLabelsMeta", chartModalState.filters.labels.size ? `${chartModalState.filters.labels.size} selected` : "Any");
+}
+
+function updateChartModal() {
+  syncChartModalMetas();
+  renderModalAssigneeList();
+  renderModalLabelChips();
+  renderChartModalChart();
+}
+
+function openChartModal(type) {
+  const root = document.getElementById("chartExpandModal");
+  if (!root) return;
+  chartModalState.open = true;
+  chartModalState.type = type;
+
+  // Initialize modal filters from current smart filters (read-only copy)
+  chartModalState.filters.assignees = new Set(smartFilters.assignees);
+  chartModalState.filters.stages = new Set(smartFilters.stages);
+  chartModalState.filters.orderTypes = new Set(smartFilters.orderTypes);
+  chartModalState.filters.labels = new Set(smartFilters.labels);
+
+  const r = getActiveDateRangeFromUi();
+  chartModalState.filters.start = r.start;
+  chartModalState.filters.end = r.end;
+  document.getElementById("modalStartDate").value = r.start ? toDateInputValue(r.start) : "";
+  document.getElementById("modalEndDate").value = r.end ? toDateInputValue(new Date(r.end.getFullYear(), r.end.getMonth(), r.end.getDate())) : "";
+
+  chartModalState.stageView = document.getElementById("stageChartViewSelect")?.value || "stage";
+  chartModalState.ageBasis = document.getElementById("ageBasisSelect")?.value === "stageEntered" ? "stageEntered" : "created";
+  chartModalState.assigneeMode = "performance";
+
+  const title = document.getElementById("chartModalTitle");
+  if (title) title.textContent = type === "stage" ? "Task Stage Distribution" : "Workload by Assignee";
+
+  const showStage = type === "stage";
+  const stageWrap = document.getElementById("modalStageModeWrap");
+  const assigneeWrap = document.getElementById("modalAssigneeModeWrap");
+  if (stageWrap) {
+    stageWrap.hidden = !showStage;
+    stageWrap.setAttribute("aria-hidden", showStage ? "false" : "true");
+  }
+  if (assigneeWrap) {
+    assigneeWrap.hidden = showStage;
+    assigneeWrap.setAttribute("aria-hidden", showStage ? "true" : "false");
+  }
+
+  // Remove these filters from Task Stage Distribution popup
+  setHiddenWithAria(document.getElementById("modalFilterAssignee"), showStage);
+  setHiddenWithAria(document.getElementById("modalFilterStage"), showStage);
+  setHiddenWithAria(document.getElementById("modalFilterOrderType"), showStage);
+  setHiddenWithAria(document.getElementById("modalFilterLabels"), showStage);
+
+  root.hidden = false;
+  root.setAttribute("aria-hidden", "false");
+
+  // Render modal filter UI (pills depend on sets; render after sets are initialized)
+  renderModalPills("modalStagePills", getAllStagesUnionSorted(), chartModalState.filters.stages, "modalStageMeta");
+  renderModalPills("modalOrderTypePills", ORDER_TYPE_OPTIONS, chartModalState.filters.orderTypes, "modalOrderTypeMeta");
+  renderModalLabelChips();
+  renderModalAssigneeList();
+
+  updateChartModal();
+}
+
+function closeChartModal() {
+  const root = document.getElementById("chartExpandModal");
+  if (!root) return;
+  destroyModalChart();
+  hideStageFlowInModal();
+  chartModalState.open = false;
+  chartModalState.type = null;
+  root.hidden = true;
+  root.setAttribute("aria-hidden", "true");
 }
 
 function csvEscape(value) {
@@ -3277,6 +4194,7 @@ function applyAndRender() {
 
   // KPI cards are driven by dropdown mode now
   renderKpis();
+  updateTaskFlowChart();
   renderActiveGrid(range);
   renderUpcomingDeadlinesFromOrders();
   renderActiveFilterChips();
@@ -3435,6 +4353,67 @@ function init() {
     });
   }
 
+  // Chart expand modal wiring
+  document.getElementById("expandStageChartBtn")?.addEventListener("click", () => openChartModal("stage"));
+  document.getElementById("expandAssigneeChartBtn")?.addEventListener("click", () => openChartModal("assignee"));
+  document.getElementById("chartModalClose")?.addEventListener("click", closeChartModal);
+  document.querySelectorAll("[data-chart-modal-dismiss]").forEach((el) => el.addEventListener("click", closeChartModal));
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const root = document.getElementById("chartExpandModal");
+    if (root?.hidden) return;
+    closeChartModal();
+  });
+
+  document.getElementById("modalAssigneeSearch")?.addEventListener("input", () => renderModalAssigneeList());
+  document.getElementById("modalClearFilters")?.addEventListener("click", () => {
+    chartModalState.filters.assignees.clear();
+    chartModalState.filters.stages.clear();
+    chartModalState.filters.orderTypes.clear();
+    chartModalState.filters.labels.clear();
+    chartModalState.filters.start = null;
+    chartModalState.filters.end = null;
+    document.getElementById("modalStartDate").value = "";
+    document.getElementById("modalEndDate").value = "";
+    updateChartModal();
+  });
+
+  document.getElementById("modalStartDate")?.addEventListener("change", (e) => {
+    chartModalState.filters.start = parseDateInputOrNull(e.target.value);
+    updateChartModal();
+  });
+  document.getElementById("modalEndDate")?.addEventListener("change", (e) => {
+    chartModalState.filters.end = parseDateInputOrNull(e.target.value);
+    updateChartModal();
+  });
+
+  // Modal pills/chips
+  renderModalPills("modalStagePills", getAllStagesUnionSorted(), chartModalState.filters.stages, "modalStageMeta");
+  renderModalPills("modalOrderTypePills", ORDER_TYPE_OPTIONS, chartModalState.filters.orderTypes, "modalOrderTypeMeta");
+  renderModalLabelChips();
+
+  document.getElementById("modalStageChartViewSelect")?.addEventListener("change", (e) => {
+    chartModalState.stageView = e.target.value || "stage";
+    if (chartModalState.stageView === "stage_aging") {
+      chartModalState.ageBasis = "stageEntered";
+      const sel = document.getElementById("modalAgeBasisSelect");
+      if (sel) sel.value = "stageEntered";
+    }
+    updateChartModal();
+  });
+  document.getElementById("modalAgeBasisSelect")?.addEventListener("change", (e) => {
+    chartModalState.ageBasis = e.target.value === "stageEntered" ? "stageEntered" : "created";
+    updateChartModal();
+  });
+
+  document.querySelectorAll('input[name="modalAssigneeChartMode"]').forEach((el) => {
+    el.addEventListener("change", () => {
+      if (!el.checked) return;
+      chartModalState.assigneeMode = el.value === "workload" ? "workload" : "performance";
+      updateChartModal();
+    });
+  });
+
   document.getElementById("scopeAllTasks")?.addEventListener("click", () => {
     managerLeadScope = "all";
     syncManagerLeadScopeVisibility();
@@ -3485,8 +4464,22 @@ function init() {
       }
       kpiMode = kpiModeSelect.value === "main" ? "main" : "sub";
       renderKpis();
+      updateTaskFlowChart();
     });
   }
+
+  // Task flow KPI visibility toggles
+  document.getElementById("taskFlowAllKpisBtn")?.addEventListener("click", () => {
+    taskFlow.viewMode = "all";
+    syncTaskFlowViewButtons();
+    updateTaskFlowChart();
+  });
+  document.getElementById("taskFlowPerfBtn")?.addEventListener("click", () => {
+    taskFlow.viewMode = "performance";
+    syncTaskFlowViewButtons();
+    updateTaskFlowChart();
+  });
+  syncTaskFlowViewButtons();
 
   if (exportBtn) {
     exportBtn.addEventListener("click", () => exportCurrentGridToCsv());
